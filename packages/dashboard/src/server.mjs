@@ -12,6 +12,7 @@
 import http from 'node:http'
 import { createUsageSource } from './agy.mjs'
 import { apiCallEnvelope, authFiles, geminiSummary, DEFAULT_TIME_ZONE } from './contract.mjs'
+import { openMetrics } from './metrics.mjs'
 import { createPatchManager } from './patch.mjs'
 
 const PORT = Number(process.env.DASHBOARD_PORT ?? 8788)
@@ -61,11 +62,16 @@ function readJson(req) {
 }
 
 /**
- * @param {{usage?: ReturnType<typeof createUsageSource>, patches?: ReturnType<typeof createPatchManager>}} [options]
+ * @param {{
+ *   usage?: ReturnType<typeof createUsageSource>,
+ *   patches?: ReturnType<typeof createPatchManager>,
+ *   metrics?: ReturnType<typeof openMetrics>,
+ * }} [options]
  */
 export function createServer(options = {}) {
   const usage = options.usage ?? createUsageSource()
   const patches = options.patches ?? createPatchManager()
+  const metrics = options.metrics ?? openMetrics()
 
   return http.createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
@@ -121,6 +127,27 @@ export function createServer(options = {}) {
           const status = error?.code === 'CONFLICT' ? 409 : 500
           sendJson(res, status, { error: message(error) })
         }
+        return
+      }
+
+      // 面板数据面：额度 + 遥测 + 解锁状态一次取齐（M4 四个页面共用）
+      if (route === 'GET /api/admin/overview') {
+        const [overview, unlock] = await Promise.all([
+          Promise.resolve(metrics.overview({ recentLimit: Number(url.searchParams.get('recent') ?? 25) })),
+          patches.status().catch(error => ({ locked: true, windowTokens: 256000, error: message(error) })),
+        ])
+        sendJson(res, 200, {
+          generatedAt: new Date().toISOString(),
+          metrics: overview,
+          unlock,
+          quota: await usage.read().then(snapshot => ({ status: 'ok', updatedAt: snapshot.updatedAt, groups: snapshot.groups }), error => ({ status: 'error', error: message(error) })),
+        })
+        return
+      }
+
+      if (route === 'GET /api/metrics/requests') {
+        const overview = metrics.overview({ recentLimit: Number(url.searchParams.get('limit') ?? 100) })
+        sendJson(res, 200, { available: overview.available, path: overview.path, requests: overview.recentRequests, error: overview.error })
         return
       }
 

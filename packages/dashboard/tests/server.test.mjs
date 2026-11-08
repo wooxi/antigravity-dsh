@@ -11,8 +11,8 @@ const here = dirname(fileURLToPath(import.meta.url))
 const groups = parseUsage(readFileSync(join(here, 'fixtures', 'usage.json'), 'utf8'))
 
 /** 起一个用假 usage 源的服务，返回基址与关闭函数。 */
-async function boot(usage, patches) {
-  const server = createServer(patches === undefined ? { usage } : { usage, patches })
+async function boot(usage, patches, metrics) {
+  const server = createServer({ usage, ...(patches === undefined ? {} : { patches }), ...(metrics === undefined ? {} : { metrics }) })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   const { port } = server.address()
   return {
@@ -177,6 +177,62 @@ test('冲突状态回 409', async () => {
     })
     assert.equal(response.status, 409)
     assert.match((await response.json()).error, /不是同一份/)
+  } finally {
+    await app.close()
+  }
+})
+
+/** 假遥测读取器：只证明路由把数据拼起来，真实 SQL 由 metrics 自己的测试覆盖。 */
+function fakeMetrics(overrides = {}) {
+  return {
+    path: '/tmp/fake-metrics.db',
+    overview() {
+      return {
+        available: true,
+        path: '/tmp/fake-metrics.db',
+        totals: { requests: 3, avgTtftMs: 5608, cacheHitRate: 12.5, totalTokens: 26903 },
+        today: { requests: 3 },
+        sessions: { total: 3, active: 0 },
+        models: [{ model: 'gemini-3.8-flash', requests: 3, totalTokens: 26903, lastAt: 1794142324550 }],
+        recentRequests: [],
+        ...overrides,
+      }
+    },
+  }
+}
+
+test('GET /api/admin/overview 拼额度 + 遥测 + 解锁状态', async () => {
+  const app = await boot(okUsage, fakePatches(), fakeMetrics())
+  try {
+    const body = await (await fetch(`${app.base}/api/admin/overview`)).json()
+    assert.equal(body.metrics.totals.requests, 3)
+    assert.equal(body.unlock.windowTokens, 256000)
+    assert.equal(body.quota.status, 'ok')
+    assert.equal(body.quota.groups.length, 2)
+    assert.equal(body.quota.groups[0].name, 'Gemini Models')
+  } finally {
+    await app.close()
+  }
+})
+
+test('GET /api/admin/overview 在 agy 挂掉时 quota 标注 error，不拖垮整页', async () => {
+  const app = await boot(brokenUsage, fakePatches(), fakeMetrics())
+  try {
+    const body = await (await fetch(`${app.base}/api/admin/overview`)).json()
+    assert.equal(body.quota.status, 'error')
+    assert.match(body.quota.error, /boom/)
+    assert.equal(body.metrics.available, true)
+  } finally {
+    await app.close()
+  }
+})
+
+test('GET /api/metrics/requests 传 limit', async () => {
+  const app = await boot(okUsage, fakePatches(), fakeMetrics({ recentRequests: [{ requestId: 'r1' }] }))
+  try {
+    const body = await (await fetch(`${app.base}/api/metrics/requests?limit=5`)).json()
+    assert.equal(body.available, true)
+    assert.equal(body.requests.length, 1)
   } finally {
     await app.close()
   }

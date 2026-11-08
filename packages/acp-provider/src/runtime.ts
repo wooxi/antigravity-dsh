@@ -7,7 +7,7 @@
  * @module dsh-llm-antigravity-acp/runtime
  */
 
-import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { LlmError } from '@deepseek-ai/dsh-llm'
@@ -22,6 +22,7 @@ import {
 } from './history.ts'
 import { JsonRpcClosedError, JsonRpcRemoteError } from './jsonrpc.ts'
 import { McpBridge, type BridgeCallRequest, type BridgeContent, type BridgeTool, type BridgeToolResult } from './mcp-bridge.ts'
+import { MetricsStore, type RequestMetric } from './metrics.ts'
 import {
   assertSupportedAgyVersion, BRIDGE_AGENT, checkUnlock, defaultHome, defaultPatchScript, GPT_OSS_CONTEXT_WINDOW,
   LOCKED_CONTEXT_WINDOW, prepareHome, readVersion, resolveAgyBinary, syncOAuthToken, UNLOCKED_CONTEXT_WINDOW,
@@ -125,6 +126,8 @@ export class AntigravityRuntime {
   readonly catalog: ModelCatalog
   readonly quota: QuotaReader
   private readonly home: string
+  /** 本地遥测库；打不开就静默降级，绝不影响模型请求。 */
+  private readonly metrics: MetricsStore | undefined
   private process: AcpProcess | undefined
   private starting: Promise<AcpProcess> | undefined
   private preflight: PreflightResult | undefined
@@ -146,6 +149,9 @@ export class AntigravityRuntime {
   /** @param host - host services. */
   constructor(private readonly host: RuntimeHost) {
     this.home = host.config.home.length > 0 ? host.config.home : defaultHome()
+    const telemetry = MetricsStore.open(join(this.home, 'metrics.db'))
+    this.metrics = telemetry.store
+    if (telemetry.error !== undefined) host.log.warn(`antigravity-acp: metrics.db unavailable (${telemetry.error})`)
     this.catalog = new ModelCatalog(join(this.home, 'catalog.json'))
     this.bridge = new McpBridge({
       listTools: tenantKey => this.listTools(tenantKey),
@@ -280,6 +286,8 @@ export class AntigravityRuntime {
     this.process?.stop()
     this.process = undefined
     await this.bridge.close()
+    this.metrics?.close()
+    this.metrics?.dispose()
   }
 
   /**
@@ -321,7 +329,8 @@ export class AntigravityRuntime {
           const resumed = await this.deliverResults(conv, split.messages, proc, tools)
           if (resumed) {
             conv.knownIds = messageIds(split.messages)
-            yield * this.pump(conv, proc, options, effort)
+            // Same ACP session, same history prefix: the implicit cache is still warm.
+            yield * this.pump(conv, proc, options, effort, 'HIT')
             return
           }
           this.dropTurn(conv, 'The conversation history changed; the harness restarted this turn.')
@@ -331,6 +340,7 @@ export class AntigravityRuntime {
       }
 
       const plan = this.plan(conv, split.system, split.messages)
+      const sessionCache: 'HIT' | 'MISS' = conv.sessionId !== undefined && !plan.rebuild ? 'HIT' : 'MISS'
       if (plan.rebuild) await this.resetSession(conv)
       if (conv.sessionId === undefined) {
         conv.systemHash = digest(split.system)
@@ -357,7 +367,7 @@ export class AntigravityRuntime {
         conv.usageCursor = peekMaxModelStepIdx(sessionDbPath(this.home, conv.sessionId))
       }
       this.startPrompt(conv, proc, blocks)
-      yield * this.pump(conv, proc, options, effort)
+      yield * this.pump(conv, proc, options, effort, sessionCache)
     } finally {
       release()
       if (conv !== undefined) {
@@ -741,10 +751,54 @@ export class AntigravityRuntime {
     )
   }
 
-  private async * pump(conv: Conversation, proc: AcpProcess, options: GenerateOptions, effort: Effort): AsyncGenerator<StreamChunk> {
+  private async * pump(
+    conv: Conversation,
+    proc: AcpProcess,
+    options: GenerateOptions,
+    effort: Effort,
+    sessionCache: 'HIT' | 'MISS',
+  ): AsyncGenerator<StreamChunk> {
     const turn = conv.turn as AcpTurn
     const sessionId = conv.sessionId as string
     let finishKind: string | undefined
+    const requestId = randomUUID()
+    const startedAt = Date.now()
+    let ttftMs = 0
+    let usage: Extract<StreamChunk, { type: 'usage' }>['usage'] | undefined
+    let toolCalls = 0
+    let failureMessage: string | undefined
+    const record = (status: RequestMetric['status'], errorMessage?: string): void => {
+      const inputTokens = usage?.inputTokens ?? 0
+      const cachedReadTokens = usage?.cacheReadTokens ?? 0
+      const cachedWriteTokens = usage?.cacheWriteTokens ?? 0
+      const outputTokens = usage?.outputTokens ?? 0
+      const thoughtTokens = usage?.reasoningTokens ?? 0
+      this.metrics?.record({
+        requestId,
+        timestamp: startedAt,
+        sessionId,
+        workerId: 'agy-acp',
+        sessionCache,
+        requestedModel: options.model,
+        resolvedBaseModel: options.model,
+        thinkingLevel: effort,
+        acpModelId: options.model,
+        actualModelVersion: this.preflight?.version ?? 'unknown',
+        ttftMs,
+        durationMs: Date.now() - startedAt,
+        stream: true,
+        finishReason: finishKind ?? (status === 'error' ? 'error' : 'unknown'),
+        toolCallsCount: toolCalls,
+        inputTokens,
+        cachedReadTokens,
+        cachedWriteTokens,
+        outputTokens,
+        thoughtTokens,
+        totalTokens: usage?.totalTokens ?? inputTokens + cachedReadTokens + cachedWriteTokens + outputTokens,
+        status,
+        ...errorMessage !== undefined ? { errorMessage } : {},
+      })
+    }
     try {
       for await (const chunk of pumpStep(turn, {
         parkSettleMs: this.host.config.parkSettleMs,
@@ -768,17 +822,34 @@ export class AntigravityRuntime {
           return { usage: batch.usage, calls: batch.calls }
         },
       }, options.signal)) {
-        if (chunk.type === 'block-end' && chunk.block.type === 'tool-call') conv.issuedIds.add(chunk.block.id)
-        if (chunk.type === 'finish') finishKind = chunk.reason.kind
+        if (chunk.type === 'block-end' && chunk.block.type === 'tool-call') {
+          conv.issuedIds.add(chunk.block.id)
+          toolCalls += 1
+        }
+        if (chunk.type === 'usage') usage = chunk.usage
+        if (chunk.type === 'finish') {
+          finishKind = chunk.reason.kind
+          const reason = chunk.reason as { failure?: { message?: string } }
+          if (reason.failure?.message !== undefined) failureMessage = reason.failure.message
+        }
+        // 首字延迟按第一段模型输出算（思考流也算），tool-call-delta 是纯本地解析，不算
+        if (ttftMs === 0 && (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta')) ttftMs = Date.now() - startedAt
         yield chunk
       }
     } catch (error) {
+      record('error', error instanceof Error ? error.message : String(error))
       conv.reportedToolCalls.clear()
       conv.turn = undefined
       conv.dirty = true
       throw mapError(error)
     }
-    if (finishKind === 'tool-calls') return
+    if (finishKind === 'tool-calls') {
+      record('success')
+      return
+    }
+    if (finishKind === 'aborted') record('error', failureMessage ?? 'aborted by the harness')
+    else if (finishKind === 'error') record('error', failureMessage ?? 'provider error')
+    else record('success')
     if (finishKind === 'aborted') {
       // A cancelled turn leaves partial agent-side history; rebuild from DSH history next time.
       await Promise.race([turnSettled(turn), delay(5_000)])

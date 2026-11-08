@@ -3,8 +3,8 @@
 > 执行会话每完成一项就更新本文件。青梧定时读取本文件向主人汇报。
 > 格式约定：`- [ ]` 未开始 / `- [~]` 进行中 / `- [x]` 已完成 / `- [!]` 阻塞
 
-**当前阶段**：M2（补丁开关）完成 → M3
-**最后更新**：2026-11-08 21:35
+**当前阶段**：M3（metrics 落库）完成 → M4
+**最后更新**：2026-11-08 22:05
 **执行会话**：DeepSeek Harness（本会话）
 
 ---
@@ -16,7 +16,7 @@
 | M0 基座跑通 | 4/5，验收待重启 | 插件已装进 web profile，真实对话已通 |
 | M1 额度接口 | 完成 | 8788 已上线，cost-meter 客户端实测 ok |
 | M2 补丁开关 | 完成 | 开关 API 就绪，真实 agy 仍锁着（等主人点开关） |
-| M3 metrics 落库 | 待开始 | |
+| M3 metrics 落库 | 完成 | metrics.db 有真实数据，面板只读读取无锁冲突 |
 | M4 面板移植 | 待开始 | |
 | M5 联调文档 | 待开始 | |
 
@@ -83,6 +83,28 @@
 | 自动化测试 | 29/29 通过（含幂等、陈旧备份拒绝、无备份拒绝、409 映射） |
 | 真实服务状态 | `curl 8788/api/context-unlock/status` → `locked:true, windowTokens:256000, backup.exists:false, restartRequired:true` |
 
+## M3 明细
+
+- [x] 插件侧写 `metrics.db`（`~/.dsh/cache/antigravity-acp/metrics.db`）
+- [x] 表结构照搬 acp2api：`sessions` / `requests`（DDL 逐字搬，含索引与 WAL）
+- [x] 采集 TTFT、duration、token（input/cached/output/thought）、cache_hit_rate、status
+- [x] 面板侧只读打开（`readOnly: true`），避免锁竞争
+- [x] **验收**：跑几轮对话后 `requests` 表有数据，TTFT 合理
+
+### M3 验收证据
+
+| 检查 | 结果 |
+|---|---|
+| 真实对话落库 | 2 轮对话 + 1 次标题生成 → `requests` 5 行；`gemini-3.8-flash`，thinking `high`/`low`，`status:success` |
+| TTFT / duration | 主请求 3444–7460ms（agy 冷启动 + 思考流），标题生成 5919ms；duration 与 TTFT 差 100–250ms |
+| token 分桶 | 主请求 input 12647 / output 362 / thought 337 / total 13009（input 是未命中缓存的量，符合 acp2api 口径） |
+| sessions 聚合 | `turns`、`hash_hits`、`avg_ttft_ms`、`cache_hit_rate` 同步更新；进程退出后遗留 ACTIVE 会在下次打开时置 CLOSED |
+| 面板只读并发 | 边写边读 2222 轮：`readErrors: 0`，最终读出 2222 行 |
+| 自动化测试 | 插件 52/52（新增 5 个 metrics 用例）、面板 32/32 |
+| 面板数据面 | `GET /api/admin/overview` 一次返回 额度 + 遥测 + 解锁状态 |
+
+> 说明：`cache_hit_rate` 目前为 0——agy 在首轮不会命中隐式缓存，且会话每轮重建；等 web 端常驻会话跑起来后才有命中样本。
+
 ## 决策记录
 
 1. **不自动打补丁**：上游默认 `autoPatch: true`，本项目在 profile 配置层显式关成 `false`（不改上游源码默认值）。解锁只由 M2 面板开关触发。
@@ -99,7 +121,10 @@
    保证它永不写盘；探测到 unlocked 才会声明 1,048,576。否则面板解锁后插件仍会按 256K 声明。
 8. **备份不匹配就拒绝 unlock**：脚本只在 `.bak` 不存在时才建备份，agy 升级后旧 `.bak` 会被保留，
    直接还原等于把版本退回去；所以 enable 前先比对 sha256，不一致回 409 让人先处理旧备份。
-9. **临时验收 profile**：`/root/.dsh/profiles/agtest`（base + headless + 本插件），用于不重启 dsh-web 的前提下验证真实链路；M3 之后可复用它跑对话造数据。
+9. **metrics 只写请求级、不写流式中间态**：每个 DSH model step 一行（`pump()` 插桩），
+   tool-calls 步与 stop 步都记；辅助会话（标题生成、压缩摘要）同样记，因为它们真花额度。
+10. **metrics 写失败只计数不抛出**：遥测坏了不能拖垮模型请求，失败数留在 `failureCount` 里。
+11. **临时验收 profile**：`/root/.dsh/profiles/agtest`（base + headless + 本插件），用于不重启 dsh-web 的前提下验证真实链路；M3 之后可复用它跑对话造数据。
 
 ## 阻塞项
 
@@ -108,7 +133,7 @@
 ## 最近一条日志
 
 ```
-2026-11-08 21:35  M2 完成：解锁开关 API 就绪，副本上 enable/disable 全绿，真实 agy 未被改写（仍 256K）
+2026-11-08 22:05  M3 完成：metrics.db 有 5 行真实请求，TTFT 3.4–7.5s，面板只读并发 0 错误
 ```
 
 ---
@@ -118,6 +143,8 @@
 <!-- 执行会话在这里追加，每次一行：时间 + 做了什么 + 结果 -->
 
 ```
+2026-11-08 22:05  M3  面板侧 `src/metrics.mjs`（readOnly + 汇总 SQL）与 `/api/admin/overview`、`/api/metrics/requests` 落地；WAL 并发压测 2222 次读写 0 错误
+2026-11-08 21:55  M3  插件侧 `src/metrics.ts`（照搬 acp2api schema）+ `runtime.pump()` 插桩：TTFT/时长/四类 token/tool 调用数/status 全部落库；插件测试 52/52
 2026-11-08 21:35  M2  `src/patch.mjs` + 两个路由落地；串联化、幂等、陈旧备份 409、无备份 409；在 /tmp 的 agy 副本上跑通 enable→disable→状态回路，真实二进制未动
 2026-11-08 21:20  M2  读上游 agy-patch.py：没有 `--restore`（PLAN §六 的回滚命令不存在），只有 `--in-place` 会建 `.bak` 且仅当 `.bak` 缺失时才建 → 决定了「陈旧备份拒绝」策略
 2026-11-08 21:10  M1  `packages/dashboard` 落地：agy.mjs（串行+重试+60s 缓存）/ contract.mjs（契约映射）/ server.mjs（路由）；systemd `antigravity-dashboard.service` 已 enable --now，监听 0.0.0.0:8788；17/17 测试通过
