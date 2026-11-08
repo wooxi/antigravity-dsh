@@ -107,7 +107,7 @@ function fakePatches() {
   const calls = []
   return {
     calls,
-    async status() { return { locked: true, windowTokens: 256000, state: 'locked', binary: '/root/.local/bin/agy', backup: { exists: false } } },
+    async status() { return { locked: true, windowTokens: 256000, state: 'locked', binary: '/root/.local/bin/agy', backup: { exists: false }, dryRun: { state: 'locked' } } },
     async enable() { calls.push('enable'); return { changed: true, locked: false, windowTokens: 1048576 } },
     async disable() { calls.push('disable'); return { changed: true, locked: true, windowTokens: 256000 } },
   }
@@ -194,6 +194,8 @@ function fakeMetrics(overrides = {}) {
         today: { requests: 3 },
         sessions: { total: 3, active: 0 },
         models: [{ model: 'gemini-3.8-flash', requests: 3, totalTokens: 26903, lastAt: 1794142324550 }],
+        series: [],
+        sessionsList: [{ sessionId: 'sess-1', model: 'gemini-3.8-flash', status: 'CLOSED', turns: 1 }],
         recentRequests: [],
         ...overrides,
       }
@@ -233,6 +235,50 @@ test('GET /api/metrics/requests 传 limit', async () => {
     const body = await (await fetch(`${app.base}/api/metrics/requests?limit=5`)).json()
     assert.equal(body.available, true)
     assert.equal(body.requests.length, 1)
+  } finally {
+    await app.close()
+  }
+})
+
+test('面板 HTML 零外链：没有 Google Fonts / CDN，样式与脚本都在本机', async () => {
+  const app = await boot(okUsage, fakePatches(), fakeMetrics())
+  try {
+    const html = await (await fetch(`${app.base}/`)).text()
+    assert.doesNotMatch(html, /fonts\.googleapis|fonts\.gstatic|cdn\.|unpkg|jsdelivr/i)
+    assert.doesNotMatch(html, /<script[^>]+src="https?:/)
+    assert.match(html, /href="\/assets\/app\.css"/)
+    assert.match(html, /src="\/assets\/app\.js"/)
+    assert.match(html, /data-ic="home"/)
+    const css = await (await fetch(`${app.base}/assets/app.css`)).text()
+    assert.doesNotMatch(css, /@import|fonts\.googleapis|Material Symbols/i)
+    assert.match(css, /system-ui/)
+    const js = await (await fetch(`${app.base}/assets/app.js`)).text()
+    assert.doesNotMatch(js, /https?:\/\//)
+    assert.match(js, /\/api\/admin\/overview/)
+  } finally {
+    await app.close()
+  }
+})
+
+test('/dashboard 与 /assets 缺失文件的行为', async () => {
+  const app = await boot(okUsage, fakePatches(), fakeMetrics())
+  try {
+    assert.equal((await fetch(`${app.base}/dashboard`)).status, 200)
+    assert.equal((await fetch(`${app.base}/assets/nope.js`)).status, 404)
+  } finally {
+    await app.close()
+  }
+})
+
+test('overview 提供面板四个页面用到的字段', async () => {
+  const app = await boot(okUsage, fakePatches(), fakeMetrics())
+  try {
+    const body = await (await fetch(`${app.base}/api/admin/overview`)).json()
+    for (const key of ['generatedAt', 'metrics', 'unlock', 'quota', 'catalog']) assert.ok(key in body, `缺 ${key}`)
+    assert.ok('series' in body.metrics && 'sessionsList' in body.metrics && 'recentRequests' in body.metrics)
+    assert.ok('models' in body.catalog && 'path' in body.catalog)
+    assert.ok('locked' in body.unlock && 'windowTokens' in body.unlock && 'backup' in body.unlock && 'dryRun' in body.unlock)
+    assert.ok('groups' in body.quota && 'updatedAt' in body.quota)
   } finally {
     await app.close()
   }

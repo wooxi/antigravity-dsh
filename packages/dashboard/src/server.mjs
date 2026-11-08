@@ -10,10 +10,21 @@
  */
 
 import http from 'node:http'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { createUsageSource } from './agy.mjs'
 import { apiCallEnvelope, authFiles, geminiSummary, DEFAULT_TIME_ZONE } from './contract.mjs'
+import { readCatalog } from './catalog.mjs'
 import { openMetrics } from './metrics.mjs'
 import { createPatchManager } from './patch.mjs'
+import { dashboardHtml } from './ui.mjs'
+
+const here = dirname(fileURLToPath(import.meta.url))
+const ASSETS = new Map([
+  ['/assets/app.css', { file: join(here, 'assets', 'dashboard.css'), type: 'text/css; charset=utf-8' }],
+  ['/assets/app.js', { file: join(here, 'assets', 'dashboard.js'), type: 'text/javascript; charset=utf-8' }],
+])
 
 const PORT = Number(process.env.DASHBOARD_PORT ?? 8788)
 const HOST = process.env.DASHBOARD_HOST ?? '0.0.0.0'
@@ -77,6 +88,26 @@ export function createServer(options = {}) {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
     const route = `${req.method} ${url.pathname}`
     try {
+      // 面板：单页 4 个标签页，资源分文件以便单独缓存
+      if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/dashboard')) {
+        const body = dashboardHtml()
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': Buffer.byteLength(body), 'Cache-Control': 'no-cache' })
+        res.end(body)
+        return
+      }
+
+      if (req.method === 'GET' && ASSETS.has(url.pathname)) {
+        const asset = ASSETS.get(url.pathname)
+        try {
+          const body = readFileSync(asset.file)
+          res.writeHead(200, { 'Content-Type': asset.type, 'Content-Length': body.length, 'Cache-Control': 'no-cache' })
+          res.end(body)
+        } catch {
+          sendJson(res, 404, { error: `missing asset ${url.pathname}` })
+        }
+        return
+      }
+
       if (route === 'GET /healthz') {
         sendJson(res, 200, { status: 'ok', timeZone: TIME_ZONE })
         return
@@ -140,6 +171,7 @@ export function createServer(options = {}) {
           generatedAt: new Date().toISOString(),
           metrics: overview,
           unlock,
+          catalog: readCatalog(),
           quota: await usage.read().then(snapshot => ({ status: 'ok', updatedAt: snapshot.updatedAt, groups: snapshot.groups }), error => ({ status: 'error', error: message(error) })),
         })
         return

@@ -64,7 +64,7 @@ export function openMetrics(path = METRICS_PATH) {
     overview(options = {}) {
       const limit = Math.min(200, Math.max(1, Number(options.recentLimit ?? 25)))
       if (!existsSync(path)) {
-        return { available: false, path, totals: totalsOf(), today: totalsOf(), sessions: { total: 0, active: 0 }, models: [], recentRequests: [], error: 'metrics.db 还不存在（插件尚未产生请求）' }
+        return { available: false, path, totals: totalsOf(), today: totalsOf(), sessions: { total: 0, active: 0 }, models: [], series: [], sessionsList: [], recentRequests: [], error: 'metrics.db 还不存在（插件尚未产生请求）' }
       }
       let db
       try {
@@ -88,6 +88,47 @@ export function openMetrics(path = METRICS_PATH) {
           requests: Number(row.requests),
           totalTokens: Number(row.total_tokens),
           lastAt: Number(row.last_at),
+        }))
+        const dayStart = Date.now() - 24 * 3600_000
+        const hourRows = db.prepare(`
+          SELECT CAST(timestamp / 3600000 AS INTEGER) AS hour,
+                 COUNT(*) AS requests,
+                 COALESCE(SUM(total_tokens), 0) AS tokens,
+                 COALESCE(SUM(ttft_ms), 0) AS ttft_sum,
+                 SUM(CASE WHEN ttft_ms > 0 THEN 1 ELSE 0 END) AS ttft_n,
+                 SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS errors
+          FROM requests WHERE timestamp >= ? GROUP BY hour ORDER BY hour
+        `).all(dayStart)
+        const byHour = new Map(hourRows.map(row => [Number(row.hour), row]))
+        const series = []
+        for (let offset = 23; offset >= 0; offset -= 1) {
+          const hour = Math.floor((Date.now() - offset * 3600_000) / 3600_000)
+          const row = byHour.get(hour)
+          series.push({
+            hourStart: hour * 3600_000,
+            requests: Number(row?.requests ?? 0),
+            tokens: Number(row?.tokens ?? 0),
+            avgTtftMs: Number(row?.ttft_n ?? 0) > 0 ? Math.round(Number(row.ttft_sum) / Number(row.ttft_n)) : 0,
+            errors: Number(row?.errors ?? 0),
+          })
+        }
+        const sessionsList = db.prepare(`
+          SELECT session_id, base_model_id, last_acp_model_id, last_thinking_level,
+                 status, turns, hash_hits, total_tokens, cache_hit_rate, avg_ttft_ms,
+                 created_at, last_active_at
+          FROM sessions ORDER BY last_active_at DESC LIMIT 20
+        `).all().map(row => ({
+          sessionId: String(row.session_id),
+          model: String(row.last_acp_model_id ?? row.base_model_id),
+          effort: String(row.last_thinking_level ?? ''),
+          status: String(row.status),
+          turns: Number(row.turns ?? 0),
+          hashHits: Number(row.hash_hits ?? 0),
+          totalTokens: Number(row.total_tokens ?? 0),
+          cacheHitRate: Number(row.cache_hit_rate ?? 0),
+          avgTtftMs: Number(row.avg_ttft_ms ?? 0),
+          createdAt: Number(row.created_at ?? 0),
+          lastActiveAt: Number(row.last_active_at ?? 0),
         }))
         const recentRequests = db.prepare(`
           SELECT request_id, timestamp, session_id, session_cache, requested_model,
@@ -122,10 +163,12 @@ export function openMetrics(path = METRICS_PATH) {
           today,
           sessions: { total: Number(sessions?.total ?? 0), active: Number(sessions?.active ?? 0) },
           models,
+          series,
+          sessionsList,
           recentRequests,
         }
       } catch (error) {
-        return { available: false, path, totals: totalsOf(), today: totalsOf(), sessions: { total: 0, active: 0 }, models: [], recentRequests: [], error: error instanceof Error ? error.message : String(error) }
+        return { available: false, path, totals: totalsOf(), today: totalsOf(), sessions: { total: 0, active: 0 }, models: [], series: [], sessionsList: [], recentRequests: [], error: error instanceof Error ? error.message : String(error) }
       } finally {
         try { db?.close() } catch { /* 只读句柄关不掉不影响下一次 */ }
       }
