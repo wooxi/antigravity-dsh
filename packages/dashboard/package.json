@@ -1,0 +1,15 @@
+{
+  "name": "antigravity-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Antigravity 本地 CLI(agy)的独立面板与额度接口：给 dsh-cost-meter 提供 cliproxyapi 兼容契约，并展示 agy 真实账号额度。",
+  "main": "src/server.mjs",
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --test --test-concurrency=1 tests/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22.19"
+  }
+}
