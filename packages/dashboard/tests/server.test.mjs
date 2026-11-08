@@ -11,8 +11,8 @@ const here = dirname(fileURLToPath(import.meta.url))
 const groups = parseUsage(readFileSync(join(here, 'fixtures', 'usage.json'), 'utf8'))
 
 /** 起一个用假 usage 源的服务，返回基址与关闭函数。 */
-async function boot(usage) {
-  const server = createServer({ usage })
+async function boot(usage, patches) {
+  const server = createServer(patches === undefined ? { usage } : { usage, patches })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   const { port } = server.address()
   return {
@@ -97,6 +97,86 @@ test('未知路径 404', async () => {
   try {
     const response = await fetch(`${app.base}/nope`)
     assert.equal(response.status, 404)
+  } finally {
+    await app.close()
+  }
+})
+
+/** 只记录调用、不碰磁盘的补丁管理器替身。 */
+function fakePatches() {
+  const calls = []
+  return {
+    calls,
+    async status() { return { locked: true, windowTokens: 256000, state: 'locked', binary: '/root/.local/bin/agy', backup: { exists: false } } },
+    async enable() { calls.push('enable'); return { changed: true, locked: false, windowTokens: 1048576 } },
+    async disable() { calls.push('disable'); return { changed: true, locked: true, windowTokens: 256000 } },
+  }
+}
+
+test('GET /api/context-unlock/status 报 locked/256K 并提示需重启', async () => {
+  const app = await boot(okUsage, fakePatches())
+  try {
+    const body = await (await fetch(`${app.base}/api/context-unlock/status`)).json()
+    assert.equal(body.locked, true)
+    assert.equal(body.windowTokens, 256000)
+    assert.equal(body.restartRequired, true)
+  } finally {
+    await app.close()
+  }
+})
+
+test('POST /api/context-unlock 只有显式 enable 才动补丁', async () => {
+  const patches = fakePatches()
+  const app = await boot(okUsage, patches)
+  try {
+    const enable = await fetch(`${app.base}/api/context-unlock`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enable: true }),
+    })
+    assert.equal(enable.status, 200)
+    assert.equal((await enable.json()).windowTokens, 1048576)
+
+    const disable = await fetch(`${app.base}/api/context-unlock`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enable: false }),
+    })
+    assert.equal(disable.status, 200)
+    assert.deepEqual(patches.calls, ['enable', 'disable'])
+  } finally {
+    await app.close()
+  }
+})
+
+test('POST /api/context-unlock 缺 enable 字段回 400，且不动补丁', async () => {
+  const patches = fakePatches()
+  const app = await boot(okUsage, patches)
+  try {
+    const response = await fetch(`${app.base}/api/context-unlock`, { method: 'POST', body: '{}' })
+    assert.equal(response.status, 400)
+    assert.deepEqual(patches.calls, [])
+  } finally {
+    await app.close()
+  }
+})
+
+test('冲突状态回 409', async () => {
+  const conflict = new Error('备份与当前 agy 不是同一份')
+  conflict.code = 'CONFLICT'
+  const app = await boot(okUsage, {
+    async status() { return { locked: true } },
+    async enable() { throw conflict },
+    async disable() { throw conflict },
+  })
+  try {
+    const response = await fetch(`${app.base}/api/context-unlock`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enable: true }),
+    })
+    assert.equal(response.status, 409)
+    assert.match((await response.json()).error, /不是同一份/)
   } finally {
     await app.close()
   }

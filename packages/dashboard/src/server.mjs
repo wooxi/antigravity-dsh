@@ -12,6 +12,7 @@
 import http from 'node:http'
 import { createUsageSource } from './agy.mjs'
 import { apiCallEnvelope, authFiles, geminiSummary, DEFAULT_TIME_ZONE } from './contract.mjs'
+import { createPatchManager } from './patch.mjs'
 
 const PORT = Number(process.env.DASHBOARD_PORT ?? 8788)
 const HOST = process.env.DASHBOARD_HOST ?? '0.0.0.0'
@@ -33,23 +34,38 @@ function sendJson(res, status, payload) {
   res.end(body)
 }
 
+const MAX_BODY_BYTES = 64 * 1024
+
 /**
- * 读掉请求体（我们不看内容，但必须读完否则连接不释放）。
+ * 读请求体并尽力解析成对象；读不完会卡住连接，所以无论内容如何都要读完。
  * @param {http.IncomingMessage} req
+ * @returns {Promise<Record<string, unknown>>}
  */
-function drain(req) {
+function readJson(req) {
   return new Promise((resolve) => {
-    req.on('data', () => {})
-    req.on('end', resolve)
-    req.on('error', resolve)
+    let text = ''
+    req.setEncoding('utf8')
+    req.on('data', (chunk) => {
+      if (text.length < MAX_BODY_BYTES) text += chunk
+    })
+    req.on('end', () => {
+      try {
+        const parsed = JSON.parse(text === '' ? '{}' : text)
+        resolve(parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {})
+      } catch {
+        resolve({})
+      }
+    })
+    req.on('error', () => resolve({}))
   })
 }
 
 /**
- * @param {{usage?: ReturnType<typeof createUsageSource>}} [options]
+ * @param {{usage?: ReturnType<typeof createUsageSource>, patches?: ReturnType<typeof createPatchManager>}} [options]
  */
 export function createServer(options = {}) {
   const usage = options.usage ?? createUsageSource()
+  const patches = options.patches ?? createPatchManager()
 
   return http.createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
@@ -75,12 +91,35 @@ export function createServer(options = {}) {
 
       // cost-meter gatewayQuotas：信封里再套一层 body 字符串，内层 status_code 表上游状态
       if (route === 'POST /v0/management/api-call') {
-        await drain(req)
+        await readJson(req)
         try {
           const snapshot = await usage.read()
           sendJson(res, 200, apiCallEnvelope(snapshot, { timeZone: TIME_ZONE }))
         } catch (error) {
           sendJson(res, 200, { status_code: 500, body: JSON.stringify({ error: message(error) }) })
+        }
+        return
+      }
+
+      // 上下文解锁开关：状态只读；开关必须显式 POST，服务自己不主动打补丁
+      if (route === 'GET /api/context-unlock/status') {
+        const status = await patches.status(url.searchParams.get('force') === '1')
+        sendJson(res, 200, { ...status, restartRequired: true })
+        return
+      }
+
+      if (route === 'POST /api/context-unlock') {
+        const body = await readJson(req)
+        if (typeof body.enable !== 'boolean') {
+          sendJson(res, 400, { error: '需要 {"enable": true|false}' })
+          return
+        }
+        try {
+          const result = body.enable ? await patches.enable() : await patches.disable()
+          sendJson(res, 200, { ...result, restartRequired: true })
+        } catch (error) {
+          const status = error?.code === 'CONFLICT' ? 409 : 500
+          sendJson(res, status, { error: message(error) })
         }
         return
       }
