@@ -3,8 +3,8 @@
 > 执行会话每完成一项就更新本文件。青梧定时读取本文件向主人汇报。
 > 格式约定：`- [ ]` 未开始 / `- [~]` 进行中 / `- [x]` 已完成 / `- [!]` 阻塞
 
-**当前阶段**：M4（面板移植）完成 → M5
-**最后更新**：2026-11-08 22:25
+**当前阶段**：M5（联调与文档）→ 差两处人工动作
+**最后更新**：2026-11-08 22:45
 **执行会话**：DeepSeek Harness（本会话）
 
 ---
@@ -18,7 +18,7 @@
 | M2 补丁开关 | 完成 | 开关 API 就绪，真实 agy 仍锁着（等主人点开关） |
 | M3 metrics 落库 | 完成 | metrics.db 有真实数据，面板只读读取无锁冲突 |
 | M4 面板移植 | 完成 | 4 页面渲染真实数据，零外链 |
-| M5 联调文档 | 待开始 | |
+| M5 联调文档 | 2/3 | 文档已写；切源与 24h 观察需主人两步操作 |
 
 ## M0 明细
 
@@ -124,6 +124,29 @@
 | 设置 | 解锁卡片（锁定 256K / dry-run sha256 / 备份状态）、接口清单、metrics.db 路径、主题切换 |
 | 零外链 | HTML/CSS/JS 里没有 `fonts.googleapis`、CDN、`@import`；只有内联 SVG 图标 |
 
+## M5 明细
+
+- [~] cost-meter 切到 8788，观察 24h —— **等主人两步操作**（见下），等价性已用 cost-meter 自己的客户端验证
+- [x] 写 README（部署、回滚、排障、契约）
+- [x] 更新 `/root/lab-manual/CHANGELOG.md` + `05-ops-history.md`
+
+### 待主人执行（各一步，都是心跳级操作）
+
+1. **重启 dsh-web**：`systemctl restart dsh-web` → 模型选择器出现 **Antigravity** 分组（未解锁时按 256K 声明）
+2. **cost-meter 换源**：设置页 → 网关额度源 `Gemini Pro` → `baseURL` 从 `http://127.0.0.1:8046` 改成 `http://127.0.0.1:8788` → 保存（5 分钟后卡片刷新）
+   > 不建议脚本手改 ledger.json：插件按版本/事务写，运行中的 dsh-web 持有内存态。
+
+### M5 证据
+
+| 检查 | 结果 |
+|---|---|
+| 插件在 web profile 里可加载 | `import('dsh-llm-antigravity-acp')` → `name: llm-antigravity-acp, exports: Config,apply,inject,name` |
+| 合成配置 | `dsh --profile web --dump-config` 含 `llm-antigravity-acp` + 三项 config |
+| cost-meter 客户端打 8788 | `queryGatewayQuota` → `status: ok`，两窗口解析正常（详见 M1） |
+| 面板 | `http://192.168.100.6:8788` 四页 200，无外链 |
+| 服务状态 | dsh-web / antigravity-dashboard / antigravity-bridge 三者均 active；dsh-web 仍是 20:12 启动的那个进程（未重启） |
+| agy 二进制 | 未改动：无 `.bak`，dry-run 仍 `7ca212748ca0 -> 73e06443e3c9` |
+
 ## 决策记录
 
 1. **不自动打补丁**：上游默认 `autoPatch: true`，本项目在 profile 配置层显式关成 `false`（不改上游源码默认值）。解锁只由 M2 面板开关触发。
@@ -149,7 +172,10 @@
     代价：多了两个 200KB 级的请求（内网无感）。
 13. **面板不做「当前进程 PID」**：dashboard 是独立进程，看不到 dsh-web 的 ACP 会话；
     「ACP 活会话」来自插件写的 sessions 表，代表真实会话而非进程。
-14. **临时验收 profile**：`/root/.dsh/profiles/agtest`（base + headless + 本插件），用于不重启 dsh-web 的前提下验证真实链路；M3 之后可复用它跑对话造数据。
+14. **M5 的切源不代劳**：cost-meter 的配置写在 ledger.json（按版本/事务维护，dsh-web 持有内存态），
+    手改等于「直接改存储」，违反 API-first。所以只交付验证过的端点和两步操作说明。
+    代价：24h 对照观察要主人切完之后才能开始。
+15. **临时验收 profile**：`/root/.dsh/profiles/agtest`（base + headless + 本插件），用于不重启 dsh-web 的前提下验证真实链路；M3 之后可复用它跑对话造数据。
 
 ## 阻塞项
 
@@ -158,7 +184,7 @@
 ## 最近一条日志
 
 ```
-2026-11-08 22:25  M4 完成：4 个页面在内网地址上渲染真实数据，零外链，35/35 测试通过
+2026-11-08 22:45  M5 文档完成（README + 运维手册）；剩主人两件事：重启 dsh-web、cost-meter 换源到 8788
 ```
 
 ---
@@ -168,6 +194,7 @@
 <!-- 执行会话在这里追加，每次一行：时间 + 做了什么 + 结果 -->
 
 ```
+2026-11-08 22:45  M5  README（架构/部署/契约/解锁/构建/回滚/排障）+ `/root/lab-manual` CHANGELOG 与 05-ops-history §Antigravity×DSH 落地
 2026-11-08 22:25  M4  面板落地：dashboard.css（上游 MD3 令牌/组件）+ dashboard.js（4 页渲染 + 5s 轮询 + 解锁开关）+ ui.mjs 骨架；用无头 Chrome `--dump-dom` 逐页核对真实数据
 2026-11-08 22:15  M4  踩坑：抽 CSS 时把上游内联主题脚本一起带进了 dashboard.css（测试「零外链」先红了才发现），已裁掉并补测试兜底
 2026-11-08 22:05  M3  面板侧 `src/metrics.mjs`（readOnly + 汇总 SQL）与 `/api/admin/overview`、`/api/metrics/requests` 落地；WAL 并发压测 2222 次读写 0 错误
