@@ -1,4 +1,5 @@
-// UI tests for QuotaPill, Popover dialog, and SettingsCard in src/client.js / lib/client.js.
+// UI tests for the Antigravity settings card and composer parameter rows in src/client.js / lib/client.js.
+// 会话输入栏的额度药丸已按需求移除，只保留「不再注册」的防回归断言。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -317,192 +318,32 @@ function loadClientPlugin({ language = 'zh-CN', remoteService } = {}) {
   return { registered, mount, document, store, intervals }
 }
 
+function recordingService(windowValue = 0, decodeValue = 3) {
+  const patches = []
+  const service = {
+    status: async () => ({
+      state: 'ready',
+      version: '1.5.1',
+      contextWindow: 1_048_576,
+      configuredContextWindow: windowValue,
+      defaultEffort: 'high',
+      longDecodeContinuations: decodeValue,
+      unlock: { status: 'unlocked' },
+    }),
+    quota: async () => ({ status: 'ok', updatedAt: new Date(FIXED_NOW).toISOString(), groups: [] }),
+    warmup: async () => ({ state: 'ready', version: '1.5.1', contextWindow: 1_048_576 }),
+    configure: async (patch) => {
+      patches.push(patch)
+      if ('contextWindow' in patch) windowValue = patch.contextWindow
+      if ('longDecodeContinuations' in patch) decodeValue = patch.longDecodeContinuations
+      return service.status()
+    },
+  }
+  return { service, patches }
+}
+
 test('lib/client.js stays in sync with src/client.js', () => {
   assert.equal(readFileSync(libClientPath, 'utf8'), readFileSync(srcClientPath, 'utf8'))
-})
-
-test('QuotaPill (zh-CN) prioritizes weekly bucket over preceding 5h bucket in collapsed pill and tooltip', async () => {
-  let resolveQuota
-  const quotaPromise = new Promise((resolve) => { resolveQuota = resolve })
-  const { registered, mount } = loadClientPlugin({
-    language: 'zh-CN',
-    remoteService: {
-      quota: () => quotaPromise,
-    },
-  })
-
-  const slot = registered.get('conversation.input.right')
-  assert.ok(slot, 'QuotaPill should register on conversation.input.right')
-  const props = slot.meta.inject('session-1')
-  const view = mount(slot.Component, props)
-
-  // Loading state before quota resolves
-  const loadingBtn = findOne(view.tree, (n) => n.tag === 'button')
-  assert.equal(textOf(loadingBtn), '周 …')
-  assert.equal(loadingBtn.props.title, 'Antigravity 套餐额度')
-
-  // Resolve with 5h (95%) intentionally placed BEFORE weekly (68%)
-  resolveQuota({
-    status: 'ok',
-    updatedAt: new Date(FIXED_NOW).toISOString(),
-    groups: [{
-      name: 'Gemini Models',
-      description: 'Gemini family',
-      buckets: [
-        { id: 'five_hour', name: '5-hour', window: '5h', remainingFraction: 0.95, resetTime: isoAfterHours(4) },
-        { id: 'weekly', name: 'Weekly', window: 'weekly', remainingFraction: 0.68, resetTime: isoAfterHours(62) },
-      ],
-    }],
-  })
-  await flush()
-
-  const btn = findOne(view.tree, (n) => n.tag === 'button')
-  assert.equal(textOf(btn), '周 68%')
-  assert.ok(!textOf(btn).includes('95%'), 'collapsed pill must not render 5h percentage')
-  assert.equal(btn.props.title, 'Gemini 每周额度 68%（2天14小时后重置） · 5 小时 95%')
-
-  // Check progress bar inside collapsed button reflects 68% and green threshold (#2e9e6a)
-  const barTrack = findOne(btn, (n) => n.tag === 'span' && n.props['aria-hidden'] === 'true')
-  assert.ok(barTrack)
-  const barFill = barTrack.children[0]
-  assert.equal(barFill.props.style.width, '68%')
-  assert.equal(barFill.props.style.background, '#2e9e6a')
-
-  view.unmount()
-})
-
-test('QuotaPill (en-US) matches weekly by id/name regex, renders Wk prefix, and orders weekly first in popover', async () => {
-  const { registered, mount, document } = loadClientPlugin({
-    language: 'en-US',
-    remoteService: {
-      quota: async () => ({
-        status: 'ok',
-        updatedAt: new Date(FIXED_NOW).toISOString(),
-        groups: [{
-          name: 'Gemini',
-          description: '',
-          buckets: [
-            { id: 'short_window', name: '5h limit', window: '5h', remainingFraction: 0.95, resetTime: isoAfterHours(3) },
-            { id: 'gemini_weekly_cap', name: 'Pro Limit', window: '', remainingFraction: 0.68, resetTime: isoAfterHours(62) },
-          ],
-        }],
-      }),
-    },
-  })
-
-  const slot = registered.get('conversation.input.right')
-  const view = mount(slot.Component, slot.meta.inject('session-en'))
-  await flush()
-
-  const btn = findOne(view.tree, (n) => n.tag === 'button')
-  assert.equal(textOf(btn), 'Wk 68%')
-  assert.equal(btn.props.title, 'Gemini weekly quota 68% (resets in 2d 14h) · 5h 95%')
-  assert.equal(btn.props['aria-expanded'], false)
-
-  // Open popover dialog
-  btn.props.onClick()
-  await flush()
-
-  const dialog = findOne(view.tree, (n) => n.props && n.props.role === 'dialog')
-  assert.ok(dialog, 'clicking QuotaPill should open role="dialog" popover')
-  assert.match(dialog.props.style.background, /var\(--dsw-alias-surface-overlay/)
-  assert.match(dialog.props.style.border, /color-mix\(in srgb/)
-
-  // Verify bucket order: weekly primary card first, 5h secondary row second
-  const bucketNodes = findAll(dialog, (n) => n.props && 'data-bucket-role' in n.props)
-  assert.equal(bucketNodes.length, 2)
-  assert.equal(bucketNodes[0].props['data-bucket-role'], 'primary')
-  assert.equal(bucketNodes[0].props['data-bucket-window'], 'gemini_weekly_cap')
-  assert.match(textOf(bucketNodes[0]), /Weekly quota/)
-  assert.match(textOf(bucketNodes[0]), /68%/)
-  assert.match(textOf(bucketNodes[0]), /Resets in 2d 14h/)
-
-  assert.equal(bucketNodes[1].props['data-bucket-role'], 'secondary')
-  assert.equal(bucketNodes[1].props['data-bucket-window'], '5h')
-  assert.match(textOf(bucketNodes[1]), /5h/)
-  assert.match(textOf(bucketNodes[1]), /95%/)
-
-  // Escape closes popover
-  document.dispatch('keydown', { key: 'Escape' })
-  assert.equal(findOne(view.tree, (n) => n.props && n.props.role === 'dialog'), null)
-
-  // Reopen and close via outside pointerdown
-  findOne(view.tree, (n) => n.tag === 'button').props.onClick()
-  await flush()
-  assert.ok(findOne(view.tree, (n) => n.props && n.props.role === 'dialog'))
-  document.dispatch('pointerdown', { target: {} })
-  assert.equal(findOne(view.tree, (n) => n.props && n.props.role === 'dialog'), null)
-
-  view.unmount()
-})
-
-test('QuotaPill bar color thresholds, error state, non-weekly fallback, and provider visibility', async () => {
-  let snapshot = {
-    status: 'ok',
-    updatedAt: new Date(FIXED_NOW).toISOString(),
-    groups: [{
-      name: 'Gemini',
-      description: '',
-      buckets: [
-        { id: 'five_hour', name: '5h', window: '5h', remainingFraction: 0.25, resetTime: isoAfterHours(2) },
-        { id: 'weekly', name: 'Weekly', window: 'weekly', remainingFraction: 0.1, resetTime: isoAfterHours(12) },
-      ],
-    }],
-  }
-
-  const { registered, mount, store } = loadClientPlugin({
-    language: 'zh-CN',
-    remoteService: {
-      quota: async () => snapshot,
-    },
-  })
-
-  const slot = registered.get('conversation.input.right')
-  const view = mount(slot.Component, slot.meta.inject('session-colors'))
-  await flush()
-
-  // Weekly 10% (< 0.15) -> red (#d9534f); 5h 25% (< 0.35) -> amber (#e0a800)
-  const pillBtn = findOne(view.tree, (n) => n.tag === 'button')
-  assert.equal(textOf(pillBtn), '周 10%')
-  pillBtn.props.onClick()
-  await flush()
-
-  const dialog = findOne(view.tree, (n) => n.props && n.props.role === 'dialog')
-  const [primaryNode, secondaryNode] = findAll(dialog, (n) => n.props && 'data-bucket-role' in n.props)
-  const primaryFill = findOne(primaryNode, (n) => n.tag === 'span' && n.props['aria-hidden'] === 'true').children[0]
-  const secondaryFill = findOne(secondaryNode, (n) => n.tag === 'span' && n.props['aria-hidden'] === 'true').children[0]
-  assert.equal(primaryFill.props.style.width, '10%')
-  assert.equal(primaryFill.props.style.background, '#d9534f')
-  assert.equal(secondaryFill.props.style.width, '25%')
-  assert.equal(secondaryFill.props.style.background, '#e0a800')
-
-  // Fallback to buckets[0] when plan has no weekly bucket
-  snapshot = {
-    status: 'ok',
-    updatedAt: new Date(FIXED_NOW).toISOString(),
-    groups: [{
-      name: 'Gemini',
-      description: '',
-      buckets: [{ id: 'daily', name: '每日', window: '24h', remainingFraction: 0.5, resetTime: isoAfterHours(8) }],
-    }],
-  }
-  const refreshBtn = findAll(dialog, (n) => n.tag === 'button')[0]
-  refreshBtn.props.onClick()
-  await flush()
-  assert.equal(textOf(findOne(view.tree, (n) => n.tag === 'button')), '每日 50%')
-
-  // Error state with empty buckets renders 周 !
-  snapshot = { status: 'error', updatedAt: new Date(FIXED_NOW).toISOString(), groups: [], error: 'agy unavailable' }
-  const dialogAfterFallback = findOne(view.tree, (n) => n.props && n.props.role === 'dialog')
-  findAll(dialogAfterFallback, (n) => n.tag === 'button')[0].props.onClick()
-  await flush()
-  assert.equal(textOf(findOne(view.tree, (n) => n.tag === 'button')), '周 !')
-
-  // Switching away from antigravity hides QuotaPill completely
-  store.setCurrent({ provider: 'deepseek', model: 'deepseek-chat' })
-  assert.equal(view.tree, null)
-
-  view.unmount()
 })
 
 test('SettingsCard sorts weekly quota ahead of 5h window', async () => {
@@ -547,65 +388,6 @@ test('SettingsCard sorts weekly quota ahead of 5h window', async () => {
 
   view.unmount()
 })
-test('QuotaPill follows the selected family: Claude and GPT use their own weekly bucket', async () => {
-  const { registered, mount, store } = loadClientPlugin({
-    language: 'zh-CN',
-    remoteService: {
-      quota: async () => ({
-        status: 'ok',
-        updatedAt: new Date(FIXED_NOW).toISOString(),
-        groups: [
-          {
-            name: 'Gemini Models',
-            description: '',
-            buckets: [{ id: 'gemini_weekly', name: 'Weekly', window: 'weekly', remainingFraction: 0.62, resetTime: isoAfterHours(50) }],
-          },
-          {
-            name: 'Claude and GPT models',
-            description: '',
-            buckets: [
-              { id: 'claude_weekly', name: 'Weekly', window: 'weekly', remainingFraction: 0.46, resetTime: isoAfterHours(100) },
-              { id: 'claude_5h', name: '5h', window: '5h', remainingFraction: 0.99, resetTime: isoAfterHours(2) },
-            ],
-          },
-        ],
-      }),
-    },
-  })
-  store.setCurrent({ provider: 'antigravity', model: 'claude-opus-5-5' })
-  const slot = registered.get('conversation.input.right')
-  const view = mount(slot.Component, slot.meta.inject('session-claude'))
-  await flush()
-  const btn = findOne(view.tree, (n) => n.tag === 'button')
-  assert.equal(textOf(btn), '周 46%')
-  assert.equal(btn.props.title, 'Claude 与 GPT 每周额度 46%（4天4小时后重置） · 5 小时 99%')
-  view.unmount()
-})
-
-function recordingService(windowValue = 0, decodeValue = 3) {
-  const patches = []
-  const service = {
-    status: async () => ({
-      state: 'ready',
-      version: '1.5.1',
-      contextWindow: 1_048_576,
-      configuredContextWindow: windowValue,
-      defaultEffort: 'high',
-      longDecodeContinuations: decodeValue,
-      unlock: { status: 'unlocked' },
-    }),
-    quota: async () => ({ status: 'ok', updatedAt: new Date(FIXED_NOW).toISOString(), groups: [] }),
-    warmup: async () => ({ state: 'ready', version: '1.5.1', contextWindow: 1_048_576 }),
-    configure: async (patch) => {
-      patches.push(patch)
-      if ('contextWindow' in patch) windowValue = patch.contextWindow
-      if ('longDecodeContinuations' in patch) decodeValue = patch.longDecodeContinuations
-      return service.status()
-    },
-  }
-  return { service, patches }
-}
-
 test('SettingsCard renders live settings as value rows that apply the chosen option', async () => {
   const { service, patches } = recordingService()
   const { registered, mount } = loadClientPlugin({ language: 'zh-CN', remoteService: service })
@@ -679,4 +461,11 @@ test('composer parameter rows expose the same live settings for Antigravity only
   await flush()
   assert.equal(other.tree, null)
   other.unmount()
+})
+
+test('会话栏不再注册额度药丸（额度只在设置页展示）', () => {
+  const { registered } = loadClientPlugin()
+  assert.equal(registered.has('conversation.input.right'), false, 'conversation.input.right 不应再被注册')
+  assert.ok(registered.has('conversation.input.model.parameters'), '模型参数行仍需注册')
+  assert.ok(registered.has('settings.section'), '设置页额度卡片仍需注册')
 })

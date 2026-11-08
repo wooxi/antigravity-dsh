@@ -115,10 +115,11 @@ export function quotaGroups(snapshot, options = {}) {
       const bucket = windowBucket(group, kind)
       if (bucket === undefined) continue
       const resetAt = bucket.resetTime
-      const labelStyle = kind === 'weekly' ? 'date' : 'time'
+      // 两行标签必须等长：cost-meter 的行是 grid，label 列按内容宽，长短不一会把
+      // 进度条的起点/可用宽度挤成两条不等长的条。所以周窗口也只写时刻，不写星期。
       groups.push({
         id: `${prefix}-${suffix}`,
-        displayName: resetAt.length > 0 ? `${title} ${resetLabel(resetAt, labelStyle, timeZone)}` : '剩余额度',
+        displayName: resetAt.length > 0 ? `${title} ${resetLabel(resetAt, 'time', timeZone)}` : '剩余额度',
         buckets: [{
           window: label,
           remainingFraction: Math.min(1, Math.max(0, bucket.remainingFraction)),

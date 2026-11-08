@@ -283,3 +283,24 @@ test('overview 提供面板四个页面用到的字段', async () => {
     await app.close()
   }
 })
+
+test('面板 logo 的 data URI 完整可解码（图标不裂）', async () => {
+  const app = await boot(okUsage, fakePatches(), fakeMetrics())
+  try {
+    const html = await (await fetch(`${app.base}/`)).text()
+    const img = /<img class="brand-logo"[^>]*src="([^"]+)"/.exec(html)
+    assert.ok(img, '找不到 brand-logo 的 src')
+    const dataUri = img[1]
+    assert.match(dataUri, /^data:image\/svg\+xml,/)
+    const svg = decodeURIComponent(dataUri.slice('data:image/svg+xml,'.length))
+    // 关键：属性值里不能出现裸的 < > "，否则 HTML 会在引号处截断
+    assert.doesNotMatch(decodeURIComponent(dataUri), /^\s*<svg[^>]*$/)
+    assert.ok(svg.trim().endsWith('</svg>'), `SVG 被截断：${svg}`)
+    assert.match(svg, /<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg"/)
+    assert.ok(!dataUri.includes('"'))
+    const icon = /<link rel="icon" href="([^"]+)"/.exec(html)
+    assert.ok(icon && icon[1] === dataUri)
+  } finally {
+    await app.close()
+  }
+})

@@ -76,12 +76,16 @@ test('POST /v0/management/api-call 信封：200 + 内层 body 字符串', () => 
     'third-party-pool-5h',
   ])
   assert.deepEqual(payload.groups.map(group => group.buckets[0].window), ['周', '5h', '周', '5h'])
+  // 两行必须等长（周也不写星期），否则 cost-meter 的进度条不对齐
   assert.deepEqual(payload.groups.map(group => group.displayName), [
-    '重置 周日 19:58',
+    '重置 19:58',
     '重置 00:58',
-    'Claude/GPT · 重置 周三 00:09',
+    'Claude/GPT · 重置 00:09',
     'Claude/GPT · 重置 01:06',
   ])
+  const labels = payload.groups.map(group => group.displayName.length)
+  assert.equal(labels[0], labels[1], 'Gemini 两行标签长度不一致')
+  assert.equal(labels[2], labels[3], 'Claude/GPT 两行标签长度不一致')
   // 契约要求 remainingFraction 是 0–1 份额，不是百分比
   assert.equal(payload.groups[0].buckets[0].remainingFraction, 0.9997507333755493)
   assert.equal(payload.groups[0].buckets[0].resetTime, '2026-11-15T11:58:40Z')
@@ -122,7 +126,7 @@ test('dsh-cost-meter 的 antigravity 解析器吃得下本服务的信封', { sk
   const envelope = apiCallEnvelope(snapshot(), { timeZone: 'Asia/Shanghai' })
   const parsed = parseAntigravityQuota(JSON.parse(envelope.body), { geminiOnly: true })
   assert.deepEqual(parsed.windows.map(window => window.id), ['gemini-pool-weekly:周', 'gemini-pool-5h:five-hour'])
-  assert.deepEqual(parsed.windows.map(window => window.label), ['重置 周日 19:58 · 周', '重置 00:58 · 5h'])
+  assert.deepEqual(parsed.windows.map(window => window.label), ['重置 19:58 · 周', '重置 00:58 · 5h'])
   // percent 是「已用」方向：(1 − 0.99975) × 100
   assert.ok(Math.abs(parsed.windows[0].percent - 0.02) < 0.05)
   assert.equal(parsed.windows[1].periodHours, 5)

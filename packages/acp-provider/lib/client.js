@@ -641,12 +641,8 @@ window.__ModuleLoader__.load({
           inject: () => ({ client }),
         }, SettingsCard)), 'antigravity-acp: settings section')
         ctx.inject(['slots', 'modelDirectories'], (scope) => {
-          scope.effect(() => scope.slots.inject('conversation.input.right', () => scope.slots.register({
-            name: 'conversation.input.right',
-            id: 'antigravity-acp-quota',
-            order: 1001,
-            inject: (sessionId) => ({ store: scope.modelDirectories.directoryFor(sessionId).store, client }),
-          }, QuotaPill)), 'antigravity-acp: quota pill')
+          // 会话输入栏不再显示额度药丸（用户要求）：布局交回 DSH 自己。
+          // 额度信息仍保留在「设置 → Antigravity」卡片里，需要时可以在这里恢复注册。
           scope.effect(() => scope.slots.inject('conversation.input.model.parameters', () => scope.slots.register({
             name: 'conversation.input.model.parameters',
             id: 'antigravity-acp-parameters',

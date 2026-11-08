@@ -4,10 +4,12 @@
  * @module antigravity-dashboard/ui
  */
 
-const FAVICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
-  + '<rect width="32" height="32" rx="8" fill="%23141218"/>'
-  + '<path d="M18 6 9 19h6l-2 7 9-13h-6z" fill="%23D0BCFF"/>'
+// data URI 必须整体 URL 编码：直接把 SVG 原文塞进 src="" 会被内部双引号截断（图标裂开）。
+const FAVICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+  + '<rect width="32" height="32" rx="8" fill="#141218"/>'
+  + '<path d="M18 6 9 19h6l-2 7 9-13h-6z" fill="#D0BCFF"/>'
   + '</svg>'
+const FAVICON = `data:image/svg+xml,${encodeURIComponent(FAVICON_SVG)}`
 
 /**
  * @param {{title?: string}} [options]
@@ -21,14 +23,14 @@ export function dashboardHtml(options = {}) {
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>${title}</title>
-<link rel="icon" href="data:image/svg+xml,${FAVICON}" />
+<link rel="icon" href="${FAVICON}" />
 <link rel="stylesheet" href="/assets/app.css" />
 </head>
 <body>
 <div class="app">
   <nav class="drawer">
     <div class="brand">
-      <img class="brand-logo" alt="" src="data:image/svg+xml,${FAVICON}" />
+      <img class="brand-logo" alt="" src="${FAVICON}" />
       <span class="brand-name">Antigravity</span>
     </div>
     <a class="nav-item" href="#home" data-page="home" data-act="nav"><span class="nav-ic" data-ic="home"></span><span>首页</span></a>
