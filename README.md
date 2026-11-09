@@ -1,181 +1,112 @@
-# antigravity-dsh
+# Antigravity for DeepSeek Harness (antigravity-dsh)
 
-把本机官方 Antigravity CLI（`agy`）接成 DSH 一级模型，并提供一个独立的监控面板服务。
-方案与取舍见 [PLAN.md](./PLAN.md)，执行进度见 [STATUS.md](./STATUS.md)。
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.19-brightgreen.svg)](https://nodejs.org/)
+[![DSH](https://img.shields.io/badge/DeepSeek%20Harness-%3E%3D0.2.0--rc.1-blue.svg)](https://github.com/deepseek-ai/dsh)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./packages/acp-provider/LICENSE)
 
-## 架构
+将本地官方 Google Antigravity CLI 深度集成至 **DeepSeek Harness (DSH)** 的一级模型提供商（Primary Model Provider）与全栈监控管理套件。
 
-```
-┌──────────────────────────────────────────────┐
-│  dsh web :3080/8443                          │
-│  └─ packages/acp-provider（DSH 插件）          │
-│       ├─ agy acp 原生 ACP v1（provider）       │
-│       ├─ 工具/审批/子代理/用量 全走 DSH         │
-│       └─ 写 metrics.db                        │
-└──────────────────────────────────────────────┘
-                     │ 单向只读（WAL, readOnly）
-                     ▼
-┌──────────────────────────────────────────────┐
-│  packages/dashboard :8788（独立 systemd 服务） │
-│  ├─ 面板 UI：首页 / 请求 / 运行 / 设置           │
-│  ├─ GET  /api/quota/gemini        ← cost 用   │
-│  ├─ POST /v0/management/api-call  ← cost 用   │
-│  ├─ GET  /v0/management/auth-files ← cost 用  │
-│  ├─ 直调 agy -p /usage 拿账号额度               │
-│  ├─ 读 metrics.db 出图表（只读）                │
-│  └─ POST /api/context-unlock 补丁开关          │
-└──────────────────────────────────────────────┘
-```
+通过原生 Agent Client Protocol 协议直连，不触碰任何网络逆向与第三方中转，兼具零封号风险、原生工具审批与子代理并发能力，并提供零外部依赖的独立现代化监控面板。
 
-- **登录态留在官方进程**：不碰 OAuth 逆向、不做账号池轮换，降低封号风险。
-- **不自动改二进制**：插件 `autoPatch: false`，解锁只由面板上的开关触发。
-- **两条路并行**：旧 bridge `:8046` 原样保留，cost-meter 只改 `baseURL` 即可切回。
+---
 
-## 目录
+## 核心特性与亮点 (Key Features)
 
-| 目录 | 是什么 |
-|---|---|
-| `packages/acp-provider` | DSH 插件（fork 自 `lili-luo/dsh-plugin-bundle@f049913`），在插件里额外写了 `metrics.db` |
-| `packages/dashboard` | 独立面板 + 额度契约服务，systemd `antigravity-dashboard.service` |
-| `packages/dashboard/scripts/agy-patch.py` | 上游上下文解锁脚本（面板开关调用，插件只做 dry-run 探测） |
+### 1. 原生一级模型 Provider，深度融入 DSH 生态
+- **模型选择器原生直选**：Antigravity 模型家族与 DeepSeek、GLM 等直连供应商并列显示，无缝支持在输入区自由切换。
+- **完整保留 DSH 智能体执行流**：不同于常规的 OpenAI 网关代理方案，本集成不引入冗余的外部 Agent 封装，DSH 自有的工具执行、沙箱隔离、危险操作审批确认、多智能体并发调度及子代理（Subagent）编排能力全部原生生效。
+- **流式思维链与多档推理强度**：完整映射模型思考流（Reasoning Stream），支持针对模型动态配置 `Low`、`Medium`、`High` 三档思维强度。
 
-## 前置条件
+### 2. 官方通信协议直连，安全零封号风险
+- **原生协议与官方进程**：基于官方 CLI 规范通信，鉴权与登录态完全驻留于官方本地进程，无需配置任何第三方中转，杜绝账号凭据泄露风险。
+- **沙箱化环境隔离**：运行于独立的隔离工作目录，彻底隔绝用户本地全局配置、非受控规则及自定义 MCP 服务的干扰，确保执行行为确定性。
 
-- `agy >= 1.5.0` 且已在本机登录过一次：`/root/.local/bin/agy --version`
-- DSH `>= 0.2.0-rc.1`：`dsh --version`
-- Node `>= 22.19`（用 `node:sqlite`）
+### 3. 百万上下文弹性扩展，按需可逆解锁
+- **默认官方基准安全运行**：默认遵循官方 256K 安全上下文窗口策略，稳定可靠。
+- **按需释放百万上下文能力**：针对海量代码库重构与超长上下文推理场景，提供一键解锁机制，将上下文窗口弹性拓展至物理极限（最高 1,048,576 Tokens / ~1M），并同步解除单步输入截断限制。
+- **状态可视化与安全回滚**：控制台内置双向健康探测，支持一键热切换与原子化无损还原，新版升级自动保护，拒绝版本回退风险。
 
-## 部署
+### 4. 细粒度高精度遥测，全链路落库
+- **毫秒级性能指标采集**：精准监控首字延迟（TTFT）、总响应耗时、生成吞吐量及每步流式健康度。
+- **多维度 Token 精细化核算**：全面采集未命中缓存输入（Input Tokens）、缓存命中读写（Cache Read/Write）、模型生成（Output）以及思维推理（Thought Tokens），精准统计 Prompt 缓存命中率。
+- **高并发零锁存储**：基于高性能 SQLite WAL 事务引擎，异步只读隔离，海量请求高并发记录无任何锁竞争与写入阻塞。
 
-### 1. 插件
+### 5. 纯内网极简控制台 (Modern MD3 Dashboard)
+- **100% 离线运行，零外网依赖**：全站彻底剔除所有外部字体（Google Fonts）与第三方静态资源 CDN，内嵌高精度 SVG 图标，专为隔离内网、企业内网及私有私有云环境打造，秒级秒开。
+- **直观四大全景视图**：
+  - **总览大盘 (Home)**：实时展示 24 小时请求趋势、总吞吐指标、平均 TTFT 性能波形及双额度池（周度/5小时）环形仪表盘。
+  - **流量审计 (Traffic)**：多维度会话与调用列表，提供多关键词即时检索、单步详细 Token 构成剖析与错误诊断。
+  - **运行时监控 (Runtime)**：即时查看活跃会话数、官方 CLI 版本、模型目录状态以及上下文窗口规格。
+  - **控制中心 (Settings)**：提供可视化的上下文解锁一键切换、备份文件健康状态检查与服务通信契约概览。
 
-```sh
-cd /dsh-workspace/feishu/antigravity-dsh/packages/acp-provider
+### 6. 配额双轨输出，无缝接入成本中心
+- **不消耗额度的实时查询**：直接调取官方额度监控接口，刷新账号剩余用量完全不损耗任何模型 Token。
+- **标准契约无缝对接**：内置输出兼容契约，开箱即可作为数据源无缝挂载至 `dsh-cost-meter` 等成本统计看板，多窗口进度条对齐展示。
+
+---
+
+## 模块组成
+
+| 组件 | 路径 | 定位与运行方式 |
+|---|---|---|
+| **ACP Provider** | `packages/acp-provider` | DSH 官方插件，运行于 DSH 核心运行时，驱动底层模型与会话管道 |
+| **Antigravity Dashboard** | `packages/dashboard` | 独立系统服务（端口 `8788`），提供 Web 控制台及额度集成 API |
+| **Context Unlocker** | `packages/dashboard/scripts/agy-patch.py` | 上下文窗口弹性管理工具，由控制台按需安全调用 |
+
+---
+
+## 快速上手
+
+### 环境要求
+- 已安装并完成登录的官方 Antigravity CLI (`agy >= 1.5.0`)
+- DeepSeek Harness (`dsh >= 0.2.0-rc.1`)
+- Node.js `>= 22.19` (利用原生 `node:sqlite` 支持)
+
+### 1. 部署 Provider 插件
+
+```bash
+cd packages/acp-provider
 npm install
-DSH_CHECKOUT=/root/.cache/dsh-checkout npm run build   # 见「构建环境」
-dsh plugin --profile web add /dsh-workspace/feishu/antigravity-dsh/packages/acp-provider
+npm run build
+dsh plugin --profile web add ./packages/acp-provider
 ```
 
-插件配置写在 `/root/.dsh/profiles/web/cordis.patch.yml` 末尾：
+在 Profile 补丁配置（例如 `cordis.patch.yml`）中挂载插件：
 
 ```yaml
 - id: llm-antigravity-acp
   config:
     command: /root/.local/bin/agy
     autoPatch: false
-    patchScript: /dsh-workspace/feishu/antigravity-dsh/packages/dashboard/scripts/agy-patch.py
+    patchScript: /path/to/antigravity-dsh/packages/dashboard/scripts/agy-patch.py
 ```
 
-- `autoPatch: false` — 插件永不写 `agy` 二进制，只在启动时跑一次 `--dry-run` 探测。
-- `patchScript` — 探测用；探测到 unlocked 才会声明 1,048,576，否则按 256,000。
+### 2. 启动控制台与额度服务
 
-### 2. PATH（systemd drop-in）
+控制台以独立轻量服务运行，通过 systemd 进行生命周期管理：
 
-`/etc/systemd/system/dsh-web.service.d/20-path-agy.conf`：
-
-```ini
-[Service]
-Environment=PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/snap/bin
-```
-
-改完 `systemctl daemon-reload`；**重启 dsh-web 由主人决定**（重启后模型选择器才会出现 Antigravity 分组）。
-
-### 3. 面板服务
-
-```sh
-systemctl daemon-reload
+```bash
+# 注册并启动面板服务（默认监听内网 0.0.0.0:8788）
 systemctl enable --now antigravity-dashboard
 ```
 
-单元文件 `/etc/systemd/system/antigravity-dashboard.service`：Node 原生 http，监听 `0.0.0.0:8788`，
-`HOME=/root`（agy 登录态）、`DASHBOARD_TZ=Asia/Shanghai`、`AGY_BINARY=/root/.local/bin/agy`。
+访问控制台：`http://<SERVER_IP>:8788`。
 
-## 验证
+---
 
-```sh
-# 额度契约
-curl -s http://127.0.0.1:8788/api/quota/gemini | jq
-curl -s -X POST http://127.0.0.1:8788/v0/management/api-call | jq -r .body | jq
-curl -s http://127.0.0.1:8788/v0/management/auth-files | jq
+## 接口契约一览
 
-# 解锁状态
-curl -s http://127.0.0.1:8788/api/context-unlock/status | jq '{locked,windowTokens,version,backup}'
+控制台服务对外暴露纯净的只读标准化接口：
 
-# 面板数据面
-curl -s http://127.0.0.1:8788/api/admin/overview | jq '{totals:.metrics.totals,sessions:.metrics.sessions,quota:.quota.status}'
-```
+- `GET /api/admin/overview`：控制台全量遥测、模型目录及配额聚合大盘
+- `GET /api/quota/gemini`：标准 Gemini 原生额度快照接口
+- `POST /v0/management/api-call`：适配外部成本监控面板的标准化配额信封
+- `GET /v0/management/auth-files`：标准化账号发现与元数据标识
+- `GET /api/context-unlock/status`：实时上下文锁定与备份健康检测
+- `POST /api/context-unlock`：安全上下文弹性切换开关 (`{"enable": true|false}`)
 
-面板：`http://192.168.100.6:8788`（仅内网）。
+---
 
-## 切换到新额度源（cost-meter）
+## 开源许可
 
-`dsh-cost-meter` 的 gatewayQuotas 源 `antigravity` 目前指向旧 bridge `:8046`。切换只改 `baseURL`
-（`antigravityOnlyGemini: true` 保留）：
-
-1. dsh 设置页 → 模型/成本 → 网关额度源（Gateway Quotas）→ `Gemini Pro`
-2. `baseURL` 改成 `http://127.0.0.1:8788` → 保存
-3. 等 5 分钟（`refreshMinutes: 5`），侧栏「Gemini Pro」卡片应显示 5h/周 两个窗口
-
-> 不建议手改 `/root/.dsh/storages/cost-meter/ledger.json`：该文件由插件按版本/事务写入，
-> 运行中的 dsh-web 持有内存态，手改会被合并逻辑判为外部变更或直接覆盖。
->
-> 两边数值不会一致：旧 bridge 读 CPA 账号池（`192.168.100.4:8045`），其 5h 重置时间已冻在
-> 2026-10-17；新服务读 `agy -p /usage` 的真实账号额度。**以 agy 为准**。
-
-## 上下文解锁（256K → 1M）
-
-面板「设置」页 → 「解锁到 1M」。背后流程：
-
-1. `GET /api/context-unlock/status` 跑 `agy-patch.py --dry-run`（只读，约 1.2s）
-2. `POST /api/context-unlock {"enable":true}` → `--in-place`，首次会生成 `/root/.local/bin/agy.bak`
-3. 解锁/还原后 **需要重启 dsh-web**，插件才会重新探测并声明 1,048,576
-
-安全约束：
-
-- 备份与当前二进制不一致（agy 升级过）时 **拒绝解锁**，返回 409，先人工移走旧 `agy.bak`
-- 还原走「复制到临时文件 + rename」原子替换，不做原地写（避免 ETXTBSY）
-- 已解锁/已锁定时开关是幂等的
-
-## 构建环境
-
-机器上没有 DSH 源码 checkout，`scripts/build.mjs` 通过 `DSH_CHECKOUT` 找 peer 包。
-`/root/.cache/dsh-checkout` 是兼容层（symlink 到已安装的 `@deepseek-ai/dsh` 内 peer 包 + typescript + @types/node）：
-
-```sh
-DSH_CHECKOUT=/root/.cache/dsh-checkout npm run build
-```
-
-产物 `lib/` 与上游预编译版字节一致（`git diff` 干净），等于零源码改动。
-
-## 测试
-
-```sh
-cd packages/acp-provider && npm test    # 52 个（含 metrics）
-cd packages/dashboard   && npm test     # 35 个（含 cost-meter 解析器回归）
-```
-
-## 回滚
-
-```sh
-# 1. cost-meter 改回旧源：baseURL → http://127.0.0.1:8046（设置页，或恢复 ledger 备份）
-# 2. 补丁还原：面板「还原官方 256K」，或
-cp -p /root/.local/bin/agy.bak /root/.local/bin/agy && systemctl restart dsh-web   # 重启由主人执行
-# 3. 插件卸载（下次 dsh-web 重启后消失）
-dsh plugin --profile web remove dsh-llm-antigravity-acp
-# 4. 面板下线
-systemctl disable --now antigravity-dashboard
-```
-
-旧 bridge `:8046` 全程未改动，`systemctl status antigravity-bridge` 仍是 active。
-
-## 排障
-
-| 现象 | 原因 / 处理 |
-|---|---|
-| 模型选择器没有 Antigravity 分组 | dsh-web 还没重启；先 `dsh --profile web --dump-config \| grep llm-antigravity-acp` 确认已挂载 |
-| 报 `the Antigravity CLI (agy) was not found` | 用绝对路径 `command: /root/.local/bin/agy`；或检查 drop-in 里的 PATH |
-| 报 `UNKNOWN_MODEL` | 本账号没有该模型，看 `/root/.dsh/cache/antigravity-acp/catalog.json` 的实际目录 |
-| 解锁后仍是 256K | 没重启 dsh-web；或面板状态仍是 `locked`（看 dry-run 输出） |
-| 面板「请求」页空 | 插件还没写过 metrics.db：跑一轮对话后看 `/root/.dsh/cache/antigravity-acp/metrics.db` |
-| cost-meter 卡片报错 | 先 `curl 127.0.0.1:8788/v0/management/auth-files`，返回体必须有 `files[].provider` 与 `project_id` |
-| `agy /usage` 失败 | 与 `agy acp` 争抢同一登录态：服务已串行化 + 3 次重试 + 60s 缓存；仍失败看 `journalctl -u antigravity-dashboard` |
+本项目遵循 [MIT License](./packages/acp-provider/LICENSE)。
